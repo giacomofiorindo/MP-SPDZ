@@ -38,6 +38,7 @@ OnlineOptions::OnlineOptions() : playerno(-1)
     opening_sum = 0;
     max_broadcast = 0;
     receive_threads = false;
+    kogge_stone_adder = false;
 #ifdef VERBOSE
     verbose = true;
 #else
@@ -273,6 +274,16 @@ OnlineOptions::OnlineOptions(ez::ezOptionParser& opt, int argc,
             "--direct" // Flag token.
     );
 
+    opt.add(
+        "", // Default.
+        0, // Required?
+        0, // Number of args expected.
+        0, // Delimiter if expecting multiple args.
+        "Kogge-Stone adder instead of ripple-carry", // Help description.
+        "-k", // Flag token.
+        "--kogge" // Flag token.
+    );
+
     opt.parse(argc, argv);
 
     if (variable_prime_length)
@@ -297,6 +308,8 @@ OnlineOptions::OnlineOptions(ez::ezOptionParser& opt, int argc,
     bits_from_squares = opt.isSet("-Q");
 
     direct = opt.isSet("--direct");
+
+    kogge_stone_adder = opt.isSet("-k");
 
     opt.resetArgs();
 }

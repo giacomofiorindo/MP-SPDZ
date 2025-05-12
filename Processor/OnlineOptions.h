@@ -37,6 +37,7 @@ public:
     int trunc_error;
     int opening_sum, max_broadcast;
     bool receive_threads;
+    bool kogge_stone_adder;
     std::string disk_memory;
     vector<long> args;
     vector<string> options;

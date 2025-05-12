@@ -9,12 +9,13 @@
 #include "BitAdder.h"
 
 #include "Protocols/BufferScope.h"
+#include "Processor/OnlineOptions.h"
 
 #include <assert.h>
 
-template<class T>
-void BitAdder::add(vector<vector<T>>& res, const vector<vector<vector<T>>>& summands,
-        SubProcessor<T>& proc, int length, ThreadQueues* queues, int player)
+template <class T>
+void BitAdder::add(vector<vector<T>> &res, const vector<vector<vector<T>>> &summands,
+                   SubProcessor<T> &proc, int length, ThreadQueues *queues, int player)
 {
     assert(not summands.empty());
     assert(not summands[0].empty());
@@ -27,7 +28,7 @@ void BitAdder::add(vector<vector<T>>& res, const vector<vector<vector<T>>>& summ
         int n_available = queues->find_available();
         int n_per_thread = queues->get_n_per_thread(res.size());
         vector<vector<array<T, 3>>> triples(n_available);
-        vector<void*> supplies(n_available);
+        vector<void *> supplies(n_available);
         for (int i = 0; i < n_available; i++)
         {
             if (T::expensive_triples)
@@ -43,9 +44,9 @@ void BitAdder::add(vector<vector<T>>& res, const vector<vector<vector<T>>>& summ
 
         ThreadJob job(&res, &summands, T::default_length, player);
         int start = queues->distribute_no_setup(job, res.size(), 0, 1,
-                &supplies);
+                                                &supplies);
         BitAdder().add(res, summands, start,
-                summands[0][0].size(), proc, T::default_length);
+                       summands[0][0].size(), proc, T::default_length);
         if (start)
             queues->wrap_up(job);
     }
@@ -53,10 +54,10 @@ void BitAdder::add(vector<vector<T>>& res, const vector<vector<vector<T>>>& summ
         add(res, summands, 0, res.size(), proc, length);
 }
 
-template<class T>
-void BitAdder::add(vector<vector<T> >& res,
-        const vector<vector<vector<T> > >& summands, size_t begin, size_t end,
-        SubProcessor<T>& proc, int length, int input_begin, const void* supply)
+template <class T>
+void BitAdder::add(vector<vector<T>> &res,
+                   const vector<vector<vector<T>>> &summands, size_t begin, size_t end,
+                   SubProcessor<T> &proc, int length, int input_begin, const void *supply)
 {
 #ifdef VERBOSE_EDA
     fprintf(stderr, "add bits %lu to %lu\n", begin, end);
@@ -79,7 +80,7 @@ void BitAdder::add(vector<vector<T> >& res,
 #ifdef VERBOSE_EDA
         fprintf(stderr, "got supply\n");
 #endif
-        auto& s = *(vector<array<T, 3>>*) supply;
+        auto &s = *(vector<array<T, 3>> *)supply;
         assert(s.size() == n_items * n_bits);
         proc.DataF.push_triples(s);
     }
@@ -87,9 +88,30 @@ void BitAdder::add(vector<vector<T> >& res,
     if (summands[0].size() > 2)
         return multi_add(res, summands, begin, end, proc, length, input_begin);
 
+    if (OnlineOptions::singleton.kogge_stone_adder)
+    {
+#ifdef VERBOSE_EDA
+        fprintf(stderr, "kogge\n");
+#endif
+        add_kogge(res, summands, begin, n_items, proc, length, n_bits, input_begin);
+    }
+    else
+    {
+#ifdef VERBOSE_EDA
+        fprintf(stderr, "ripple\n");
+#endif
+        add_ripple(res, summands, begin, n_items, proc, length, n_bits, input_begin);
+    }
+}
+
+template <class T>
+void BitAdder::add_ripple(vector<vector<T>> &res,
+    const vector<vector<vector<T>>> &summands, size_t begin, size_t n_items,
+    SubProcessor<T> &proc, int length, int n_bits, int input_begin)
+{
     vector<T> carries(n_items);
     vector<T> a(n_items), b(n_items);
-    auto& protocol = proc.protocol;
+    auto &protocol = proc.protocol;
     BufferScope scope(proc.DataF, n_items * length * n_bits);
     for (int i = 0; i < n_bits; i++)
     {
@@ -119,10 +141,94 @@ void BitAdder::add(vector<vector<T> >& res,
         res[begin + j][n_bits] = carries[j];
 }
 
-template<class T>
-void BitAdder::multi_add(vector<vector<T> >& res,
-        const vector<vector<vector<T> > >& summands, size_t begin, size_t end,
-        SubProcessor<T>& proc, int length, int input_begin)
+template <class T>
+void BitAdder::add_kogge(vector<vector<T>> &res,
+    const vector<vector<vector<T>>> &summands, size_t begin, size_t n_items,
+    SubProcessor<T> &proc, int length, int n_bits, int input_begin)
+{
+    vector<T> a(n_items), b(n_items);
+    auto &protocol = proc.protocol;
+    BufferScope scope(proc.DataF, n_items * length * n_bits * 3);
+
+    vector<vector<T>> gen(n_bits, vector<T>(n_items));  // Generate signals
+    vector<vector<T>> prop(n_bits, vector<T>(n_items)); // Propagate signals
+
+    protocol.init_mul();
+    for (int i = 0; i < n_bits; i++)
+    {
+        assert(summands[i].size() == 2);
+        assert(summands[i][0].size() >= input_begin + n_items);
+        assert(summands[i][1].size() >= input_begin + n_items);
+
+        for (size_t j = 0; j < n_items; j++)
+        {
+            a[j] = summands[i][0][input_begin + j];
+            b[j] = summands[i][1][input_begin + j];
+
+            prop[i][j] = a[j] + b[j];
+            protocol.prepare_mul(a[j], b[j], length);
+        }
+
+    }
+    protocol.exchange();
+    for (int i = 0; i < n_bits; i++)
+    {
+        for (size_t j = 0; j < n_items; j++)
+        {
+            gen[i][j] = protocol.finalize_mul(length);
+        }
+    }
+
+    vector<vector<T>> carries(n_bits + 1, vector<T>(n_items));
+    int tree_depth = ceil(log2(n_bits));
+    for (int d = 0; d < tree_depth; d++)
+    {
+        int stride = 1 << d;
+        protocol.init_mul();
+
+        for (int i = stride; i < n_bits; i++)
+        {
+            for (size_t j = 0; j < n_items; j++)
+            {
+                protocol.prepare_mul(prop[i][j], carries[i - stride + 1][j], length);
+            }
+        }
+
+        protocol.exchange();
+
+        for (int i = stride; i < n_bits; i++)
+        {
+            for (size_t j = 0; j < n_items; j++)
+            {
+                carries[i + 1][j] = gen[i][j] + protocol.finalize_mul(length);
+            }
+        }
+
+        if (d == 0)
+        {
+            for (size_t j = 0; j < n_items; j++)
+            {
+                carries[1][j] = gen[0][j];
+            }
+        }
+    }
+
+    for (int i = 0; i < n_bits; i++)
+    {
+        for (size_t j = 0; j < n_items; j++)
+        {
+            res[begin + j][i] = prop[i][j] + carries[i][j];
+        }
+    }
+
+    for (size_t j = 0; j < n_items; j++)
+        res[begin + j][n_bits] = carries[n_bits][j];
+}
+
+template <class T>
+void BitAdder::multi_add(vector<vector<T>> &res,
+                         const vector<vector<vector<T>>> &summands, size_t begin, size_t end,
+                         SubProcessor<T> &proc, int length, int input_begin)
 {
     int n_bits = summands.size() + ceil(log2(proc.P.num_players()));
     size_t n_items = end - begin;
@@ -131,18 +237,18 @@ void BitAdder::multi_add(vector<vector<T> >& res,
 
     vector<vector<vector<T>>> my_summands(n_bits);
 
-    for (auto& x : my_summands)
+    for (auto &x : my_summands)
     {
         x.resize(2);
-        for (auto& y : x)
+        for (auto &y : x)
             y.resize(n_items);
     }
 
     for (size_t i = 0; i < summands.size(); i++)
         for (int j = 0; j < 2; j++)
         {
-            auto& x = my_summands.at(i).at(j);
-            auto& z = summands.at(i).at(j);
+            auto &x = my_summands.at(i).at(j);
+            auto &z = summands.at(i).at(j);
             auto y = z.begin() + input_begin;
             assert(y + n_items <= z.end());
             x.clear();
@@ -160,10 +266,10 @@ void BitAdder::multi_add(vector<vector<T> >& res,
 
         for (size_t i = 0; i < summands.size(); i++)
         {
-            auto& z = summands.at(i).at(k);
+            auto &z = summands.at(i).at(k);
             auto y = z.begin() + input_begin;
             assert(y + n_items <= z.end());
-            auto& x = my_summands.at(i).at(1);
+            auto &x = my_summands.at(i).at(1);
             x.clear();
             x.insert(x.begin(), y, y + n_items);
         }
